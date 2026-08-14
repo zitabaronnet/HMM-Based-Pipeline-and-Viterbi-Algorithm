@@ -12,7 +12,7 @@ from itertools import product
 import pandas as pd
 
 from decimal import *
-getcontext().prec = 50
+getcontext().prec = 100
 
 
 def parse_data(path: Path):
@@ -62,18 +62,6 @@ class TokenList:
         return TokenList(tok, an, order=order)
 
     def clean_and_tokenize(self) -> None:
-
-        # determine first word
-        """
-        for word in self.unclean_tokens:
-            if len(word) == 1:
-                word = word[0]
-                if self.clean_pattern.sub("", word) != "":
-                    self.first_word = word
-                    break
-            else:
-                print("Kill me")
-        """
 
         for idx, word_list in enumerate(self.unclean_tokens):
             for word in word_list:
@@ -151,6 +139,7 @@ class TokenHMMData:
         if additional_tokens is not None:
             unique_tokens = unique_tokens.union(set(additional_tokens))
 
+        self.total_word_counter = total_word_counter
         self.unique_tokens = list(unique_tokens)
         self.total_words = len(total_word_counter)
         self.first_word_counter = Counter(first_word_list)
@@ -186,13 +175,14 @@ class TokenHMMData:
             if v not in self.single_hash_to_token_map[h_v[0]]:
                 self.single_hash_to_token_map[h_v[0]].append(v)
 
-
+        total_pairs = 0
         for token_list in self.token_lists:
 
             token_values = token_list.get_tokens()
             state_sequence = self.order_transform(token_values)
 
             for state_head, state_tail in zip(state_sequence[:-2], state_sequence[1:]):
+                total_pairs += 1
 
                 self.transition_probability_map[(state_head, state_tail)] += Decimal(1)
 
@@ -202,8 +192,13 @@ class TokenHMMData:
                 if state_tail not in self.image_map[state_head]:
                     self.image_map[state_head].append(state_tail)
 
+        # note that since pairs are counted via a sliding window of width 2, the number of pairs equals the number of words
+        total_words = total_pairs
         for key, value in self.transition_probability_map.items():
-            self.transition_probability_map[key] = value / self.total_words**self.order
+
+            p_a_and_b = value / Decimal(total_pairs)
+            p_b = Decimal(self.total_word_counter[key[0]]) / Decimal(total_words)
+            self.transition_probability_map[key] = p_a_and_b / p_b
 
         """
         if self.order == 1:
@@ -246,12 +241,17 @@ class TokenHMMData:
         return self.transition_probability_map[(start, end)]
 
     def get_transition_prob_vector_for_target(self, current_state: Union[str, Tuple[str, ...]]) -> pd.Series:
+
+        # determines to what extent states with transition probability 0 should be
+        # able to manifest in the end result
+        #
+        DECISION_FACTOR = Decimal(99) / 100
+        DECISION_FACTOR_INVERSE = 1 - DECISION_FACTOR
+
         preimages = self.preimage_map[current_state]
-        preimage_vals = [self.transition_probability_map[pre, current_state] for pre in preimages]
-        total_prob = sum(preimage_vals, start=Decimal(0))
-        remaining_prob = Decimal(1) - total_prob
+        preimage_vals = [DECISION_FACTOR * self.transition_probability_map[pre, current_state] for pre in preimages]
         remaining_states = len(self.states) - len(preimages)
-        leftover_prob = remaining_prob / remaining_states
+        leftover_prob = DECISION_FACTOR_INVERSE / remaining_states
         self.probability_vector.iloc[:] = leftover_prob
 
         self.probability_vector.loc[preimages] = preimage_vals
@@ -350,7 +350,6 @@ def viterbi(observed_seq, hmm_data: TokenHMMData):
                 oktp = True
 
         assert oktp
-    print()
 
     #print("Reconstru")
     reconstructed_states = [""] * n_obs
@@ -400,7 +399,37 @@ def compare_sequence(expected_output: List[str], predicted_output: List[str], ha
 
     return misprediction_rate, (m_cor, med_cor, var_cor), (m_inc, med_inc, var_inc)
 
-def run_single_viterbi_test(paths_train: List[Union[str, Path]], path_test: Union[str, Path], cutoff=1000):
+
+def plot_hash_distribution(hmm: TokenHMMData):
+
+    labels = []
+    buckets = []
+    for h in product("1234567890abcdef",repeat=2):
+        label = "".join(h)
+        labels.append(h)
+        buckets.append((label, len(hmm.get_hash_preimage(label))))
+
+    bs = sorted(buckets, key=lambda x: -x[1])
+    bs_slice = bs[:20]
+
+    bs_labels = [a for a, b in bs_slice]
+    bs_values = [b for a, b in bs_slice]
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_style('darkgrid')
+    sns.set_palette("colorblind")
+
+
+    pp = sns.histplot(x=bs_labels,y=bs_values,bins=len(bs_labels))
+    pp.set_xlabel("Truncated Hash Values", fontsize=15)
+    pp.set_ylabel("Amount of preimages", fontsize=15)
+    plt.tight_layout()
+    plt.savefig("./hash_freq_most.eps")
+    pass
+
+def run_single_viterbi_test(paths_train: List[Union[str, Path]], path_test: Union[str, Path], cutoff=100):
 
     paths_train = [p for p in paths_train if p.name != path_test.name]
 
@@ -409,6 +438,8 @@ def run_single_viterbi_test(paths_train: List[Union[str, Path]], path_test: Unio
 
     corpus_train = TokenHMMData.from_paths(*paths_train, additional_tokens=corpus_test.get_unique_tokens())
     corpus_train.precompute_maps()
+
+    # plot_hash_distribution(corpus_train)
 
     sample_list = corpus_test.get_token_list(0)
     sample_full = sample_list.get_hashed_tokens()
@@ -430,7 +461,7 @@ def load_all_corpora(folders: List[str]):
         all_paths.extend(pp)
     return all_paths
 
-def run_viterbi_loo_for_work(folder_path: str, cutoff=-1):
+def run_viterbi_loo(folder_path: str, cutoff=-1):
     from os import listdir
     all_docs = load_all_corpora([folder_path+p for p in listdir(folder_path) if not p.startswith(".")] )
 
@@ -445,17 +476,17 @@ def run_viterbi_loo_for_work(folder_path: str, cutoff=-1):
             rat, cor_stat, inc_stat = run_single_viterbi_test(train_data, test_data)
             results.append((rat, i))
             print(rat)
-        except Exception as e:
-            print(e)
-            continue
+        except Exception as _:
+            pass
+        continue
 
-    print(min(results, key=lambda x: x[0]))
+    total_results = [a for a, b in results]
 
-    return min(results, key=lambda x: x[0])
+    return print("[Alignment] LOO misprediction rate = ", np.mean(total_results), "median misprediction rate", np.median(total_results))
 
 
 
-def run_single_alignment(paths_train: List[Union[str, Path]], path_test: Union[str, Path], cutoff=1000):
+def run_single_alignment(paths_train: List[Union[str, Path]], path_test: Union[str, Path], cutoff=100):
 
     from novelshare.align import align_tokens, make_plugin_case, make_plugin_propagate, make_plugin_retokenize, make_plugin_mlm
     assert path_test not in paths_train
@@ -515,5 +546,5 @@ def run_alignment_loo(folder_path: str, cutoff=-1):
 
 if __name__ == "__main__":
 
-    #run_viterbi_loo_for_work("data/Pride_and_Prejudice/",cutoff=10)
-    run_alignment_loo("data/Moby_Dick/")
+    run_viterbi_loo("data/Moby_Dick/", cutoff=10)
+    run_alignment_loo("data/Pride_and_Prejudice/")
