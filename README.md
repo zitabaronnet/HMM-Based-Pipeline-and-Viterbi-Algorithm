@@ -6,4 +6,4 @@ This HMM-based pipeline reconstructs text that has been hashed using the pipelin
 
 ## Experimentation
 
-The HMM-based pipeline uses the corpora in the data folder in the novelshare repository. To test its efficiency on your own hashed text, replace ```"data/Moby_Dick/"``` and ```"data/Pride_and_Prejudice/"``` filenames in the ```if __name__ == "__main__"``` function at the end of the HMM_and_Viterbi.py file.
+The HMM-based pipeline uses the corpora in the data folder in the novelshare repository as default. To test its efficiency on your own hashed text, replace ```"data/Moby_Dick/"``` and ```"data/Pride_and_Prejudice/"``` filenames in the ```if __name__ == "__main__"``` function at the end of the HMM_and_Viterbi.py file.
